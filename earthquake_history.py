@@ -140,6 +140,8 @@ def data_processing_transformation(df):
             return "Moderate Alert"
         else:
             return "No Alert"
+            
+        df["full_alert_level"] = df.apply(expanded_alert, axis=1)
 
     return df
 
