@@ -130,6 +130,8 @@ def data_processing_transformation(df):
         else:
             return "No Alert"
 
+        df["full_alert_level"] = df.apply(expanded_alert, axis=1)
+
     return df
 
 # Converts data types for dynamodb
@@ -147,14 +149,12 @@ def save_to_dynamodb(df):
     boto3.setup_default_session(region_name='us-east-1')
     wr.dynamodb.put_df(df=df, table_name='earthquakes')
 
- 
-
 def clean_transform_write_daily_data(params=None):
     json_data = fetch_daily_earthquake_data()
     df = clean_data(json_data)
     df = data_processing_transformation(df)
     df = process_data_for_dynamodb(df)
-    # save_to_dynamodb(df)
+    save_to_dynamodb(df)
 
 def lambda_handler(event, context):
     clean_transform_write_daily_data()
