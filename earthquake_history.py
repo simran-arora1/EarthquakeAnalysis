@@ -48,9 +48,13 @@ def clean_data(json_data):
     df = pd.json_normalize(json_data["features"])
 
     # Extract longitude, latitude, depth
-    df["longitude"] = df["geometry.coordinates"].apply(lambda x: x[0] if isinstance(x, list) else None)
-    df["latitude"] = df["geometry.coordinates"].apply(lambda x: x[1] if isinstance(x, list) else None)
-    df["depth_km"] = df["geometry.coordinates"].apply(lambda x: x[2] if isinstance(x, list) else None)
+    #df["longitude"] = df["geometry.coordinates"].apply(lambda x: x[0] if isinstance(x, list) else None)
+    #df["latitude"] = df["geometry.coordinates"].apply(lambda x: x[1] if isinstance(x, list) else None)
+    #df["depth_km"] = df["geometry.coordinates"].apply(lambda x: x[2] if isinstance(x, list) else None)
+    coordinates = df["geometry.coordinates"].apply(pd.Series)
+    df["longitude"] = coordinates[0]
+    df["latitude"] = coordinates[1]
+    df["depth_km"] = coordinates[2]
          
     # Rename Columns
     df = df.rename(columns={
@@ -93,12 +97,12 @@ def clean_data(json_data):
     df["felt_reports"] = df["felt_reports"].fillna(np.nan)
     df["cdi_intensity"] = df["cdi_intensity"].fillna(np.nan)
     df["mmi_intensity"] = df["mmi_intensity"].fillna(np.nan)
-    df["significance"] = df["significance"].fillna(0)
-    df["tsunami_warning"] = df["tsunami_warning"].fillna(0)
-    df["station_count"] = df["station_count"].fillna(0)
-    df["distance_to_nearest_station"] = df["distance_to_nearest_station"].fillna(0.0)
-    df["rms_amplitude"] = df["rms_amplitude"].fillna(0.0)
-    df["azimuthal_gap"] = df["azimuthal_gap"].fillna(0.0)
+    df["significance"] = df["significance"].fillna(np.nan)
+    df["tsunami_warning"] = df["tsunami_warning"].fillna(np.nan)
+    df["station_count"] = df["station_count"].fillna(np.nan)
+    df["distance_to_nearest_station"] = df["distance_to_nearest_station"].fillna(np.nan)
+    df["rms_amplitude"] = df["rms_amplitude"].fillna(np.nan)
+    df["azimuthal_gap"] = df["azimuthal_gap"].fillna(np.nan)
 
     # Drop Rows with Essential Data Missing
     df.dropna(subset=["magnitude", "latitude", "longitude", "depth_km"])
