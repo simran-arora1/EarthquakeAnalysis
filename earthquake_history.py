@@ -13,6 +13,10 @@ from datetime import datetime
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from botocore.exceptions import ClientError
+import reverse_geocoder as rg
+import pycountry_convert as pc
+import pycountry
+import re
 
 # USGS Earthquake API Endpoint
 USGS_API_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
@@ -20,6 +24,26 @@ USGS_API_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
 # DynamoDB config
 REGION = "us-east-1"
 TABLE_NAME = "earthquakes"
+
+countries = {}
+
+US_STATE_ABBR = {
+    "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
+    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
+    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI",
+    "WV", "WY", "DC", "AS", "GU", "MP", "PR", "VI"}
+
+US_STATE_NAMES = {
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", 
+    "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", 
+    "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", 
+    "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+    "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", 
+    "New Jersey", "New Mexico", "New York", "North Carolina", "North Dakota", 
+    "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", 
+    "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", 
+    "Washington", "West Virginia", "Wisconsin", "Wyoming"}
 
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
 table = dynamodb.Table(TABLE_NAME)
@@ -43,28 +67,33 @@ def fetch_historical_earthquake_data(start_time="2024-01-01", end_time="2024-12-
         print(f" Failed to retrieve data: {response.status_code}")
         return None
 
-
 def clean_data(json_data):
     df = pd.json_normalize(json_data["features"])
 
     # Extract longitude, latitude, depth
-    #df["longitude"] = df["geometry.coordinates"].apply(lambda x: x[0] if isinstance(x, list) else None)
-    #df["latitude"] = df["geometry.coordinates"].apply(lambda x: x[1] if isinstance(x, list) else None)
-    #df["depth_km"] = df["geometry.coordinates"].apply(lambda x: x[2] if isinstance(x, list) else None)
-    coordinates = df["geometry.coordinates"].apply(pd.Series)
-    df["longitude"] = coordinates[0]
-    df["latitude"] = coordinates[1]
-    df["depth_km"] = coordinates[2]
-         
+    coords_df = pd.DataFrame(df["geometry.coordinates"].tolist(), columns=["longitude", "latitude", "depth_km"])
+    df = pd.concat([df, coords_df], axis=1)
+
+    # Drop irrelevant columns
+    df = df.drop([
+        'type',
+        'properties.detail',
+        'properties.net', 
+        'geometry.type',  
+        'properties.tz', 
+        'geometry.coordinates', 
+        'properties.code', 
+        'properties.nst', 
+        'properties.dmin', 
+        'properties.ids'], axis=1)
+
     # Rename Columns
     df = df.rename(columns={
         "properties.mag": "magnitude",
         "properties.place": "location",
         "properties.time": "time_epoch",
         "properties.updated": "updated_time_epoch",
-        "properties.tz": "timezone",
         "properties.url": "detail_url",
-        "properties.detail": "detail_api",
         "properties.felt": "felt_reports",
         "properties.cdi": "cdi_intensity",
         "properties.mmi": "mmi_intensity",
@@ -72,20 +101,13 @@ def clean_data(json_data):
         "properties.status": "review_status",
         "properties.tsunami": "tsunami_warning",
         "properties.sig": "significance",
-        "properties.net": "network",
-        "properties.code": "event_code",
-        "properties.ids": "event_ids",
+        "properties.type": "event_type",
         "properties.sources": "data_sources",
         "properties.types": "event_types",
-        "properties.nst": "station_count",
-        "properties.dmin": "distance_to_nearest_station",
         "properties.rms": "rms_amplitude",
         "properties.gap": "azimuthal_gap",
         "properties.magType": "magnitude_type",
-        "properties.type": "event_type",
-        "properties.title": "event_title",
-        "geometry.type": "geometry_type",
-        "geometry.coordinates": "coordinates",
+        "properties.title": "event_title"
     })
 
     # Processing Missing Values
@@ -93,23 +115,53 @@ def clean_data(json_data):
     df["location"] = df["location"].fillna("unknown")
     df["magnitude_type"] = df["magnitude_type"].fillna("unknown")
     df["event_type"] = df["event_type"].fillna("unknown")
-    # df["alert_level", "location", "magnitude_type", "event_type"] = df[["alert_level", "location", "magnitude_type", "event_type"]].fillna("unknown")
-    df["felt_reports"] = df["felt_reports"].fillna(np.nan)
-    df["cdi_intensity"] = df["cdi_intensity"].fillna(np.nan)
-    df["mmi_intensity"] = df["mmi_intensity"].fillna(np.nan)
+    df["felt_reports"] = df["felt_reports"].astype(float).fillna(np.nan)
+    df["cdi_intensity"] = df["cdi_intensity"].astype(float).fillna(np.nan)
+    df["mmi_intensity"] = df["mmi_intensity"].astype(float).fillna(np.nan)
     df["significance"] = df["significance"].fillna(np.nan)
     df["tsunami_warning"] = df["tsunami_warning"].fillna(np.nan)
-    df["station_count"] = df["station_count"].fillna(np.nan)
-    df["distance_to_nearest_station"] = df["distance_to_nearest_station"].fillna(np.nan)
     df["rms_amplitude"] = df["rms_amplitude"].fillna(np.nan)
     df["azimuthal_gap"] = df["azimuthal_gap"].fillna(np.nan)
 
     # Drop Rows with Essential Data Missing
     df.dropna(subset=["magnitude", "latitude", "longitude", "depth_km"])
 
-    df = df.drop(['coordinates'], axis=1)
-
     return df
+
+# Geo lookup
+def latlon_to_country(lat, lon):
+    try:
+        result = rg.search((lat, lon), mode=1)[0]
+        return pycountry.countries.get(alpha_2=result['cc']).name
+    except:
+        return "Unknown"
+
+# Converts country code to continent
+def country_to_continent(country_code):
+    try:
+        return pc.country_alpha2_to_continent_code(country_code)
+    except:
+        return "Unknown"
+
+# Get corresponding country and continent of earthquake
+def get_country_continent(location, lat, lon):
+    try:
+        country_name = ""
+        # use regex to extract region name
+        region = re.search(r",\s*(.*)$", location)
+        # region extracted is country
+        if region in countries:
+            country_name = region
+        # region extracted is US state
+        elif region in US_STATE_ABBR or region in US_STATE_NAMES:
+            country_name = "United States"
+        else:
+             # use coordiates to extract country
+            country_name = latlon_to_country(lat, lon)
+
+        return country_name, country_to_continent(countries[country_name])
+    except:
+        return "Unknown", "Unknown"
 
 def data_processing_transformation(df):
     # breaking down time components for easy analysis
@@ -117,16 +169,15 @@ def data_processing_transformation(df):
     df["year"] = df["time_readable"].dt.year
     df["month"] = df["time_readable"].dt.month
     df["day"] = df["time_readable"].dt.day
-    df["hour"] = df["time_readable"].dt.hour
-    df["day_of_week"] = df["time_readable"].dt.dayofweek
     df["quarter"] = df["time_readable"].dt.quarter
-    
-    # extracting accuate region name
-    df["region_name"] = df["location"].str.extract(r",\s*(.*)$")
-    df["region_name"] = df["region_name"].fillna("Unknown")
 
-    # display of important location info
-    df["location_info_display"] = df["location"] + " (Magnitude " + df["magnitude"].astype(str) + ")" 
+    # breaking down updated time components
+    df['updated_time_readable'] = pd.to_datetime(df["updated_time_epoch"], unit="ms")
+    df["updated_year"] = df["updated_time_readable"].dt.year
+    df["updated_month"] = df["updated_time_readable"].dt.month
+    
+    # extracting region information (country and continent)
+    df[["country", "continent"]] = df.apply(lambda row: get_country_continent(row["location"], row["latitude"], row["longitude"]), axis=1, result_type="expand")
 
     # expanded alert classification 
     def expanded_alert(row):
@@ -156,7 +207,8 @@ def process_data_for_dynamodb(df):
         df[c] = df[c].apply(lambda x: Decimal(str(x)) if pd.notnull(x) else x)
 
     df['time_readable']= df['time_readable'].astype(str)
-
+    df['updated_time_readable']= df['updated_time_readable'].astype(str)
+    
     return df
 
 # writes data to dynamodb
@@ -170,6 +222,7 @@ def clean_transform_write(json_data):
     df = data_processing_transformation(df)
     df = process_data_for_dynamodb(df)
     save_to_dynamodb(df)
+    return df.shape[0]
 
 
 # NOTE: There is a limit on how much data can be fetched at once
@@ -189,15 +242,18 @@ def get_last_year_data(min_magnitude=4):
         end = ((monthly_dates[i+1].replace(hour=0, minute=0, second=0, microsecond=0)) - relativedelta(seconds=1)).strftime('%Y-%m-%dT%H:%M:%S')
 
         json_data = fetch_historical_earthquake_data(start, end, params)
-        clean_transform_write(json_data)
+        record_num = record_num + clean_transform_write(json_data)
 
     # Get remaining data from the current month
     start = monthly_dates[-1].strftime('%Y-%m-%d')
     end = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
     json_data = fetch_historical_earthquake_data(start, end, params)
-    clean_transform_write(json_data)
+    record_num = record_num + clean_transform_write(json_data)
 
     #print('Total number of records retrieved:', record_num)
+
+for country in list(pycountry.countries):
+    countries[country.name] = country.alpha_2
 
 params = {'minmagnitude':4}
 get_last_year_data(params)
