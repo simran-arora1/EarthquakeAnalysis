@@ -188,25 +188,23 @@ def data_processing_transformation(df):
     df[["country", "continent"]] = df.apply(lambda row: get_country_continent(row["location"], row["latitude"], row["longitude"]), axis=1, result_type="expand")
 
     # expanded alert classification 
-    def expanded_alert(row):
-        if row["tsunami_warning"] == 1 and row["magnitude"] >= 6.5:
-            return "Severe Tsunami Risk"
-        elif row["tsunami_warning"] == 1:
-            return "Tsunami Warning"
-        elif row["magnitude"] >= 7.0:
-            return "Major Earthquake"
-        elif row["magnitude"] >= 6.0:
-            return "Strong Earthquake"
-        elif row["alert_level"] in ["orange", "red"]:
-            return "Significant Alert"
-        elif row["alert_level"] in ["yellow", "green"]:
-            return "Moderate Alert"
-        else:
-            return "No Alert"
+    conditions = [
+    (df["tsunami_warning"] == 1) & (df["magnitude"] >= 6.5),
+    (df["tsunami_warning"] == 1),
+    (df["magnitude"] >= 7.0),
+    (df["magnitude"] >= 6.0),
+    df["alert_level"].isin(["orange", "red"]),
+    df["alert_level"].isin(["yellow", "green"])]
 
-    df["full_alert_level"] = df.apply(expanded_alert, axis=1)
+    choices = [
+    "Severe Tsunami Risk",
+    "Tsunami Warning",
+    "Major Earthquake",
+    "Strong Earthquake",
+    "Significant Alert",
+    "Moderate Alert"]
 
-    return df
+    df["full_alert_level"] = np.select(conditions, choices, default="No Alert")
 
 # Converts data types for dynamodb
 def process_data_for_dynamodb(df):
