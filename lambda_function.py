@@ -210,7 +210,10 @@ def data_processing_transformation(df):
 def process_data_for_dynamodb(df):
     float_columns =  df.select_dtypes(include=['float','int'])
     for c in float_columns:
-        df[c] = df[c].apply(lambda x: Decimal(str(x)) if pd.notnull(x) else x)
+        str_vals = df[c].astype(str)
+        mask = df[c].notnull()
+        df[c] = np.where(mask, str_vals, None)
+        df[c] = df[c].apply(lambda x: Decimal(x) if x is not None else None)
 
     df['time_readable']= df['time_readable'].astype(str)
     df['updated_time_readable']= df['updated_time_readable'].astype(str)
