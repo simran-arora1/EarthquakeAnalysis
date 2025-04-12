@@ -45,10 +45,8 @@ US_STATE_NAMES = {
     "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", 
     "Washington", "West Virginia", "Wisconsin", "Wyoming"}
 
-dynamodb = boto3.resource("dynamodb", region_name=REGION)
-table = dynamodb.Table(TABLE_NAME)
 
-# Function to fetch historical Earthquake Data from USGS API
+# Fetch historical Earthquake Data from USGS API
 def fetch_historical_earthquake_data(start_time="2024-01-01", end_time="2024-12-31", additional_params=None):
     params = {
         "starttime": start_time,
@@ -67,6 +65,7 @@ def fetch_historical_earthquake_data(start_time="2024-01-01", end_time="2024-12-
         print(f" Failed to retrieve data: {response.status_code}")
         return None
 
+# Clean data
 def clean_data(json_data):
     df = pd.json_normalize(json_data["features"])
 
@@ -115,9 +114,9 @@ def clean_data(json_data):
     df["location"] = df["location"].fillna("unknown")
     df["magnitude_type"] = df["magnitude_type"].fillna("unknown")
     df["event_type"] = df["event_type"].fillna("unknown")
-    df["felt_reports"] = df["felt_reports"].astype(float).fillna(np.nan)
-    df["cdi_intensity"] = df["cdi_intensity"].astype(float).fillna(np.nan)
-    df["mmi_intensity"] = df["mmi_intensity"].astype(float).fillna(np.nan)
+    df["felt_reports"] = df["felt_reports"].fillna(np.nan)
+    df["cdi_intensity"] = df["cdi_intensity"].fillna(np.nan)
+    df["mmi_intensity"] = df["mmi_intensity"].fillna(np.nan)
     df["significance"] = df["significance"].fillna(np.nan)
     df["tsunami_warning"] = df["tsunami_warning"].fillna(np.nan)
     df["rms_amplitude"] = df["rms_amplitude"].fillna(np.nan)
@@ -130,25 +129,19 @@ def clean_data(json_data):
 
 # Geo lookup
 def latlon_to_country(lat, lon):
-    try:
-        result = rg.search((lat, lon), mode=1)[0]
-        return pycountry.countries.get(alpha_2=result['cc']).name
-    except:
-        return "Unknown"
+    result = rg.search((lat, lon), mode=1)[0]
+    return pycountry.countries.get(alpha_2=result['cc']).name
 
 # Converts country code to continent
 def country_to_continent(country_code):
-    try:
-        return pc.country_alpha2_to_continent_code(country_code)
-    except:
-        return "Unknown"
+    return pc.country_alpha2_to_continent_code(country_code)
 
 # Get corresponding country and continent of earthquake
 def get_country_continent(location, lat, lon):
     try:
         country_name = ""
         # use regex to extract region name
-        region = re.search(r",\s*(.*)$", location)
+        region = re.search(r",\s*(.*)$", location).group(1)
         # region extracted is country
         if region in countries:
             country_name = region
@@ -163,13 +156,14 @@ def get_country_continent(location, lat, lon):
     except:
         return "Unknown", "Unknown"
 
+# Transform data
 def data_processing_transformation(df):
     # breaking down time components for easy analysis
     df["time_readable"] = pd.to_datetime(df["time_epoch"], unit="ms")
+    df["date"] = df["time_readable"].dt.date
     df["year"] = df["time_readable"].dt.year
     df["month"] = df["time_readable"].dt.month
     df["day"] = df["time_readable"].dt.day
-    df["quarter"] = df["time_readable"].dt.quarter
 
     # breaking down updated time components
     df['updated_time_readable'] = pd.to_datetime(df["updated_time_epoch"], unit="ms")
@@ -204,19 +198,23 @@ def data_processing_transformation(df):
 def process_data_for_dynamodb(df):
     float_columns =  df.select_dtypes(include=['float','int'])
     for c in float_columns:
-        df[c] = df[c].apply(lambda x: Decimal(str(x)) if pd.notnull(x) else x)
+        str_vals = df[c].astype(str)
+        mask = df[c].notnull()
+        df[c] = np.where(mask, str_vals, None)
+        df[c] = df[c].apply(lambda x: Decimal(x) if x is not None else None)
 
+    df['date']= df['date'].astype(str)
     df['time_readable']= df['time_readable'].astype(str)
     df['updated_time_readable']= df['updated_time_readable'].astype(str)
     
     return df
 
-# writes data to dynamodb
+# Writes data to dynamodb
 def save_to_dynamodb(df):
     boto3.setup_default_session(region_name='us-east-1')
     wr.dynamodb.put_df(df=df, table_name='earthquakes')
 
-# cleans, transforms and writes data to dynamodb
+# Cleans, transforms and writes data to dynamodb
 def clean_transform_write(json_data):
     df = clean_data(json_data)
     df = data_processing_transformation(df)
@@ -224,10 +222,10 @@ def clean_transform_write(json_data):
     save_to_dynamodb(df)
     return df.shape[0]
 
-
+# Retrieves data from the past year using monthly increments
+def get_last_year_data(min_magnitude=4):
 # NOTE: There is a limit on how much data can be fetched at once
 # So the data is fetched using monthly increments
-def get_last_year_data(min_magnitude=4):
 
     start = datetime.now(timezone.utc) - relativedelta(months=13)
     end = datetime.now(timezone.utc)
@@ -250,10 +248,12 @@ def get_last_year_data(min_magnitude=4):
     json_data = fetch_historical_earthquake_data(start, end, params)
     record_num = record_num + clean_transform_write(json_data)
 
-    #print('Total number of records retrieved:', record_num)
+    print('Total number of records retrieved:', record_num)
 
+# Create a global map of countries and it's corresponding country code
 for country in list(pycountry.countries):
     countries[country.name] = country.alpha_2
 
+# Get earthquakes with magnitude greater than 4
 params = {'minmagnitude':4}
 get_last_year_data(params)
