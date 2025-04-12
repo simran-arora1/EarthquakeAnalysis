@@ -14,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from boto3.dynamodb.conditions import Key, Attr
 import pycountry
+import pycountry_convert as pc
+import re
 
 # USGS Earthquake API Endpoint
 USGS_API_URL = "https://earthquake.usgs.gov/fdsnws/event/1/query"
@@ -38,15 +40,15 @@ US_STATE_NAMES = {
     "South Dakota", "Tennessee", "Texas", "Utah", "Vermont", "Virginia", 
     "Washington", "West Virginia", "Wisconsin", "Wyoming"}
 
+# Get the most recent updated timestamp from datatbase
 def get_latest_datetimestamp_db():
     dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
     table = dynamodb.Table("earthquakes")
     year = datetime.now(timezone.utc).year
     month = datetime.now(timezone.utc).month
-    print(month)
     
     response = table.scan(
-        FilterExpression=Attr("year").eq(year) and Attr("year").eq(year), 
+        FilterExpression=Attr("updated_year").eq(year) and Attr("updated_month").eq(month), 
         ProjectionExpression='time_epoch')
 
     if len(response['Items']) != 0:
@@ -61,6 +63,7 @@ def get_latest_datetimestamp_db():
 
     return latest_datetime
 
+# Get daily earthquake data
 def fetch_daily_earthquake_data(starttime, additional_params=None):
     params = {"starttime": starttime}
     if additional_params != None: params.update(additional_params)
@@ -74,6 +77,7 @@ def fetch_daily_earthquake_data(starttime, additional_params=None):
         print(f" Failed to retrieve data: {response.status_code}")
         return None
 
+# Clean data
 def clean_data(json_data):
     df = pd.json_normalize(json_data["features"])
 
@@ -145,17 +149,14 @@ def latlon_to_country(lat, lon):
 
 # Converts country code to continent
 def country_to_continent(country_code):
-    try:
-        return pc.country_alpha2_to_continent_code(country_code)
-    except:
-        return "Unknown"
+    return pc.country_alpha2_to_continent_code(country_code)
 
 # Get corresponding country and continent of earthquake
 def get_country_continent(location, lat, lon):
     try:
         country_name = ""
         # use regex to extract region name
-        region = re.search(r",\s*(.*)$", location)
+        region = re.search(r",\s*(.*)$", location).group(1)
         # region extracted is country
         if region in countries:
             country_name = region
@@ -163,9 +164,8 @@ def get_country_continent(location, lat, lon):
         elif region in US_STATE_ABBR or region in US_STATE_NAMES:
             country_name = "United States"
         else:
-             # use coordiates to extract country
+            # use coordiates to extract country
             country_name = latlon_to_country(lat, lon)
-
         return country_name, country_to_continent(countries[country_name])
     except:
         return "Unknown", "Unknown"
@@ -177,7 +177,6 @@ def data_processing_transformation(df):
     df["year"] = df["time_readable"].dt.year
     df["month"] = df["time_readable"].dt.month
     df["day"] = df["time_readable"].dt.day
-    df["quarter"] = df["time_readable"].dt.quarter
 
     # breaking down updated time component
     df['updated_time_readable'] = pd.to_datetime(df["updated_time_epoch"], unit="ms")
@@ -188,23 +187,25 @@ def data_processing_transformation(df):
     df[["country", "continent"]] = df.apply(lambda row: get_country_continent(row["location"], row["latitude"], row["longitude"]), axis=1, result_type="expand")
 
     # expanded alert classification 
-    conditions = [
-    (df["tsunami_warning"] == 1) & (df["magnitude"] >= 6.5),
-    (df["tsunami_warning"] == 1),
-    (df["magnitude"] >= 7.0),
-    (df["magnitude"] >= 6.0),
-    df["alert_level"].isin(["orange", "red"]),
-    df["alert_level"].isin(["yellow", "green"])]
+    def expanded_alert(row):
+        if row["tsunami_warning"] == 1 and row["magnitude"] >= 6.5:
+            return "Severe Tsunami Risk"
+        elif row["tsunami_warning"] == 1:
+            return "Tsunami Warning"
+        elif row["magnitude"] >= 7.0:
+            return "Major Earthquake"
+        elif row["magnitude"] >= 6.0:
+            return "Strong Earthquake"
+        elif row["alert_level"] in ["orange", "red"]:
+            return "Significant Alert"
+        elif row["alert_level"] in ["yellow", "green"]:
+            return "Moderate Alert"
+        else:
+            return "No Alert"
 
-    choices = [
-    "Severe Tsunami Risk",
-    "Tsunami Warning",
-    "Major Earthquake",
-    "Strong Earthquake",
-    "Significant Alert",
-    "Moderate Alert"]
+    df["full_alert_level"] = df.apply(expanded_alert, axis=1)
 
-    df["full_alert_level"] = np.select(conditions, choices, default="No Alert")
+    return df
 
 # Converts data types for dynamodb
 def process_data_for_dynamodb(df):
@@ -226,6 +227,7 @@ def save_to_dynamodb(df):
     wr.dynamodb.put_df(df=df, table_name='earthquakes')
     print("Stored:", df.shape[0], 'records')
 
+# Retrieve, clean, transform and write data to database 
 def clean_transform_write_latest_data(params=None):
     starttime = get_latest_datetimestamp_db()
     json_data = fetch_daily_earthquake_data(starttime)
@@ -237,6 +239,7 @@ def clean_transform_write_latest_data(params=None):
     save_to_dynamodb(df)
 
 def lambda_handler(event, context):
+    # Create a global map of countries and it's corresponding country code
     for country in list(pycountry.countries):
         countries[country.name] = country.alpha_2
 
